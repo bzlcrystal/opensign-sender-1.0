@@ -167,13 +167,13 @@ export async function POST(request: Request) {
       Placeholders: [placeholder],
       SignatureType: ["eSignature"],
       SentToOthers: true,
-      SentMail: true,
+      SendMail: true,
       SendinOrder: false,
       SendInOrderStrict: false,
       IsEnableOTP: false,
       AllowModifications: false,
       AutomaticReminders: false,
-      NotifyOnSignatures: false
+      NotifyOnSignatures: true
     };
 
     const documentResponse = await fetch(
