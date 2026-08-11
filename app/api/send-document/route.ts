@@ -2,79 +2,140 @@ import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
-const positions = {
-  devis: { x: 166, y: 746, w: 108, h: 38 },
-  resa: { x: 133, y: 686, w: 154, h: 44 }
+const signaturePositions = {
+  devis: {
+    x: 166,
+    y: 746,
+    w: 108,
+    h: 38
+  },
+  resa: {
+    x: 133,
+    y: 686,
+    w: 154,
+    h: 44
+  }
 } as const;
 
-async function readResponse(response: Response) {
+type ParsedResponse = {
+  text: string;
+  data: unknown;
+};
+
+async function parseResponse(response: Response): Promise<ParsedResponse> {
   const text = await response.text();
+
   try {
-    return { text, data: JSON.parse(text) as unknown };
+    return {
+      text,
+      data: JSON.parse(text)
+    };
   } catch {
-    return { text, data: {} };
+    return {
+      text,
+      data: {}
+    };
   }
 }
 
 function findString(value: unknown, keys: string[]): string | undefined {
-  if (!value || typeof value !== "object") return undefined;
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
   const object = value as Record<string, unknown>;
 
   for (const key of keys) {
-    if (typeof object[key] === "string") return object[key] as string;
+    if (typeof object[key] === "string") {
+      return object[key] as string;
+    }
   }
 
   for (const child of Object.values(object)) {
     const result = findString(child, keys);
-    if (result) return result;
+
+    if (result) {
+      return result;
+    }
   }
+
+  return undefined;
 }
 
 export async function POST(request: Request) {
   try {
-    const form = await request.formData();
-    const file = form.get("file");
-    const model = String(form.get("model") || "devis") as keyof typeof positions;
-    const signerName = String(form.get("signerName") || "").trim();
-    const signerEmail = String(form.get("signerEmail") || "").trim();
-    const title = String(form.get("title") || "Document à signer").trim();
+    const formData = await request.formData();
 
-    if (!(file instanceof File) || file.type !== "application/pdf") {
-      return NextResponse.json({ error: "Un fichier PDF est obligatoire." }, { status: 400 });
+    const file = formData.get("file");
+    const model = String(formData.get("model") || "devis") as keyof typeof signaturePositions;
+    const signerName = String(formData.get("signerName") || "").trim();
+    const signerEmail = String(formData.get("signerEmail") || "").trim();
+    const title = String(formData.get("title") || "Document à signer").trim();
+
+    if (!(file instanceof File)) {
+      return NextResponse.json(
+        { error: "Aucun fichier PDF reçu." },
+        { status: 400 }
+      );
+    }
+
+    if (file.type !== "application/pdf") {
+      return NextResponse.json(
+        { error: "Le fichier doit être au format PDF." },
+        { status: 400 }
+      );
     }
 
     if (!signerName || !signerEmail) {
-      return NextResponse.json({ error: "Le nom et l’e-mail sont obligatoires." }, { status: 400 });
+      return NextResponse.json(
+        { error: "Le nom et l’adresse e-mail du signataire sont obligatoires." },
+        { status: 400 }
+      );
     }
 
-    const baseUrl = process.env.OPENSIGN_URL?.replace(/\/$/, "");
-    const appId = process.env.OPENSIGN_APP_ID || "opensign";
-    const userEmail = process.env.OPENSIGN_USER_EMAIL;
-    const userPassword = process.env.OPENSIGN_USER_PASSWORD;
+    const opensignUrl = process.env.OPENSIGN_URL?.replace(/\/$/, "");
+    const applicationId = process.env.OPENSIGN_APP_ID || "opensign";
+    const opensignEmail = process.env.OPENSIGN_USER_EMAIL;
+    const opensignPassword = process.env.OPENSIGN_USER_PASSWORD;
 
-    if (!baseUrl || !userEmail || !userPassword) {
-      return NextResponse.json({ error: "Variables OpenSign manquantes côté serveur." }, { status: 500 });
+    if (!opensignUrl || !opensignEmail || !opensignPassword) {
+      return NextResponse.json(
+        {
+          error:
+            "Configuration OpenSign incomplète. Vérifie OPENSIGN_URL, OPENSIGN_USER_EMAIL et OPENSIGN_USER_PASSWORD."
+        },
+        { status: 500 }
+      );
     }
 
-    const commonHeaders = {
-      "X-Parse-Application-Id": appId,
+    const baseHeaders = {
+      "X-Parse-Application-Id": applicationId,
       Accept: "application/json"
     };
 
-    const loginResponse = await fetch(`${baseUrl}/functions/loginuser`, {
-      method: "POST",
-      headers: {
-        ...commonHeaders,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ email: userEmail, password: userPassword })
-    });
+    // 1. Connexion avec le compte OpenSign dédié.
+    const loginResponse = await fetch(
+      `${opensignUrl}/functions/loginuser`,
+      {
+        method: "POST",
+        headers: {
+          ...baseHeaders,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          email: opensignEmail,
+          password: opensignPassword
+        })
+      }
+    );
 
-    const login = await readResponse(loginResponse);
+    const login = await parseResponse(loginResponse);
 
     if (!loginResponse.ok) {
       return NextResponse.json(
-        { error: `Connexion OpenSign ${loginResponse.status}: ${login.text.slice(0, 500)}` },
+        {
+          error: `Échec de connexion OpenSign (${loginResponse.status}): ${login.text.slice(0, 500)}`
+        },
         { status: 502 }
       );
     }
@@ -88,18 +149,20 @@ export async function POST(request: Request) {
 
     if (!sessionToken) {
       return NextResponse.json(
-        { error: `Aucun sessionToken reçu par OpenSign: ${login.text.slice(0, 500)}` },
+        {
+          error: `OpenSign n’a pas retourné de sessionToken: ${login.text.slice(0, 500)}`
+        },
         { status: 502 }
       );
     }
 
-    // OpenSign attend d'abord un fichier Parse, puis son URL dans le document.
-    const uploadedFile = await fetch(
-      `${baseUrl}/files/${encodeURIComponent(file.name)}`,
+    // 2. Upload du PDF dans Parse Files.
+    const uploadResponse = await fetch(
+      `${opensignUrl}/files/${encodeURIComponent(file.name)}`,
       {
         method: "POST",
         headers: {
-          ...commonHeaders,
+          ...baseHeaders,
           "Content-Type": "application/pdf",
           "X-Parse-Session-Token": sessionToken
         },
@@ -107,25 +170,30 @@ export async function POST(request: Request) {
       }
     );
 
-    const uploaded = await readResponse(uploadedFile);
+    const upload = await parseResponse(uploadResponse);
 
-    if (!uploadedFile.ok) {
+    if (!uploadResponse.ok) {
       return NextResponse.json(
-        { error: `Upload PDF OpenSign ${uploadedFile.status}: ${uploaded.text.slice(0, 700)}` },
+        {
+          error: `Échec de l’upload PDF (${uploadResponse.status}): ${upload.text.slice(0, 700)}`
+        },
         { status: 502 }
       );
     }
 
-    const pdfUrl = findString(uploaded.data, ["url"]);
+    const pdfUrl = findString(upload.data, ["url"]);
 
     if (!pdfUrl) {
       return NextResponse.json(
-        { error: `OpenSign n’a pas retourné l’URL du PDF: ${uploaded.text.slice(0, 500)}` },
+        {
+          error: `OpenSign n’a pas retourné d’URL pour le PDF: ${upload.text.slice(0, 500)}`
+        },
         { status: 502 }
       );
     }
 
-    const position = positions[model] || positions.devis;
+    // 3. Préparation du placeholder au format interne OpenSign.
+    const position = signaturePositions[model] || signaturePositions.devis;
     const placeholderId = `sender-${Date.now()}`;
 
     const placeholder = {
@@ -152,10 +220,21 @@ export async function POST(request: Request) {
       ]
     };
 
-    // Ces noms avec majuscules sont ceux utilisés par contracts_Document.
+    // 4. Création du document OpenSign.
+    // Les majuscules sont obligatoires pour cette fonction interne.
     const documentPayload = {
       Name: title,
       URL: pdfUrl,
+      SentToOthers: true,
+      SendMail: true,
+      SendinOrder: false,
+      SendInOrderStrict: false,
+      IsEnableOTP: false,
+      IsTourEnabled: false,
+      AllowModifications: false,
+      AutomaticReminders: false,
+      NotifyOnSignatures: false,
+      SignatureType: ["eSignature"],
       Signers: [
         {
           Name: signerName,
@@ -164,48 +243,55 @@ export async function POST(request: Request) {
           Id: placeholderId
         }
       ],
-      Placeholders: [placeholder],
-      SignatureType: ["eSignature"],
-      SentToOthers: true,
-      SendMail: true,
-      SendinOrder: false,
-      SendInOrderStrict: false,
-      IsEnableOTP: false,
-      AllowModifications: false,
-      AutomaticReminders: false,
-      NotifyOnSignatures: true
+      Placeholders: [placeholder]
     };
 
     const documentResponse = await fetch(
-      `${baseUrl}/functions/createdocumentfromapp`,
+      `${opensignUrl}/functions/createdocumentfromapp`,
       {
         method: "POST",
         headers: {
-          ...commonHeaders,
+          ...baseHeaders,
           "Content-Type": "application/json",
           "X-Parse-Session-Token": sessionToken
         },
-        body: JSON.stringify({ document: documentPayload })
+        body: JSON.stringify({
+          document: documentPayload
+        })
       }
     );
 
-    const created = await readResponse(documentResponse);
+    const document = await parseResponse(documentResponse);
 
     if (!documentResponse.ok) {
       return NextResponse.json(
-        { error: `Création OpenSign ${documentResponse.status}: ${created.text.slice(0, 900)}` },
+        {
+          error: `Échec de création OpenSign (${documentResponse.status}): ${document.text.slice(0, 900)}`
+        },
         { status: 502 }
       );
     }
 
+    const documentId = findString(document.data, ["objectId"]);
+    const signingUrl = findString(document.data, [
+      "signing_url",
+      "signingUrl",
+      "signUrl",
+      "url",
+      "link"
+    ]);
+
     return NextResponse.json({
-      message: "Document créé et renseigné dans OpenSign.",
-      url: findString(created.data, ["url", "signing_url", "signUrl", "link"]),
-      response: created.data
+      message: "Document créé et envoyé à OpenSign.",
+      documentId,
+      url: signingUrl,
+      response: document.data
     });
   } catch (error) {
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Erreur serveur inconnue." },
+      {
+        error: error instanceof Error ? error.message : "Erreur serveur inconnue."
+      },
       { status: 500 }
     );
   }
