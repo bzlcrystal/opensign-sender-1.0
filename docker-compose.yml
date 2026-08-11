@@ -1,0 +1,12 @@
+services:
+  opensign-sender:
+    build: .
+    container_name: opensign-sender
+    restart: unless-stopped
+    ports:
+      - "3100:3000"
+    environment:
+      NODE_ENV: production
+      OPENSIGN_URL: ${OPENSIGN_URL}
+      OPENSIGN_API_TOKEN: ${OPENSIGN_API_TOKEN}
+      OPENSIGN_APP_ID: ${OPENSIGN_APP_ID:-opensign}
