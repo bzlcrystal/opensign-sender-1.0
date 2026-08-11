@@ -167,6 +167,7 @@ export async function POST(request: Request) {
       Placeholders: [placeholder],
       SignatureType: ["eSignature"],
       SentToOthers: true,
+      SentMail: true,
       SendinOrder: false,
       SendInOrderStrict: false,
       IsEnableOTP: false,
